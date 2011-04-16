@@ -202,20 +202,13 @@ def eval_ast(ast, env)
 			ast
 		end
 	else
-		function_slot = ast.first
-		if function_slot.kind_of? LispSym
-			if Object.private_methods.include? "eval_#{function_slot.val}"
-				Object.send :"eval_#{function_slot.val}", ast.rest, env
-			else
-				evaled_func = eval_ast(function_slot, env)
-				if evaled_func.kind_of? LispPair and evaled_func.first.kind_of? LispSym and evaled_func.first.val == "lambda"
-					exec_lambda(evaled_func.rest, ast.rest, env)
-				else
-					ast
-				end
-			end
+		function_slot = eval_ast(ast.first, env)
+		if function_slot.kind_of? LispSym and Object.private_methods.include? "eval_#{function_slot.val}"
+			Object.send :"eval_#{function_slot.val}", ast.rest, env
+		elsif function_slot.kind_of? LispPair and function_slot.first.kind_of? LispSym and function_slot.first.val == "lambda"
+			exec_lambda(function_slot.rest, ast.rest, env)
 		else
-			ast
+			raise LispException, "Expected a build in or lambda in the function slot but got #{print_ast(function_slot)}"
 		end
 	end
 end
@@ -272,6 +265,10 @@ def eval_if(ast, env)
 	end
 end
 
+def eval_quote(ast, env)
+	ast.first
+end
+
 def eval_define(ast, env)
 	name = ast.first
 	raise LispException, "define requires a symbol as first parameter" unless name.kind_of? LispSym
@@ -287,7 +284,7 @@ def eval_binding(ast, env)
 		if env.parent
 			eval_binding(ast, env.parent)
 		else
-			ast
+			raise LispException, "Could not resolve symbol #{ast.val}"
 		end
 	end
 end
@@ -306,12 +303,26 @@ def exec_lambda(lambda, args, env)
 	param, arg = param_names, args
 	begin
 		lambda_env[param.first.val] = eval_ast(arg.first, env)
-	end until param.rest.kind_of? LispNil or arg.rest.kind_of? LispNil
+		param, arg = param.rest, arg.rest
+	end until param.kind_of? LispNil or arg.kind_of? LispNil
 	
 	eval_ast(body, lambda_env)
 end
 
-env = Environment.new
+
+#
+# Build the global environment with entries for all build ins
+#
+global_env = Environment.new
+Object.private_methods.select{|m| m.start_with? "eval_"}.collect{|m| m.gsub /^eval_/, ''}.each do |name|
+	global_env[name] = LispSym.new(name)
+end
+
+
+#
+# Run some eval tests
+#
+test_env = global_env.dup
 {
 	"(cons 1 2)" => "(1 . 2)",
 	"(first (cons 1 2))" => "1", "(rest (cons 1 2))" => "2",
@@ -321,9 +332,12 @@ env = Environment.new
 	"(if true 1 2)" => "1", "(if false 1 2)" => "2", "(if (eq? 5 5) 1 2)" => "1",
 	"(define a (plus 1 2))" => "3", "a" => "3",
 	"(define inc (lambda (a) (plus a 1)))" => "(lambda (a) (plus a 1))",
-	"(inc 2)" => "3"
+	"(inc 2)" => "3",
+	"((lambda (a b) (plus a b)) 1 2)" => "3",
+	"(quote a)" => "a",
+	'(quote (a 1 "b"))' => '(a 1 "b")'
 }.each do |code, result|
-	assert result, print_ast(eval_ast(read(code), env))
+	assert result, print_ast(eval_ast(read(code), test_env))
 end
 
 
@@ -331,7 +345,6 @@ end
 # input console
 #
 
-global_env = Environment.new
 print "> "
 while line = gets
 	begin
