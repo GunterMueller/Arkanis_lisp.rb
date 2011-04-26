@@ -397,17 +397,31 @@ def eval_set_rest(ast, env)
 end
 
 def eval_plus(ast, env)
-	params = ast
-	a, b = eval_ast(params.first, env), eval_ast(params.rest.first, env)
-	raise LispException, "plus requires two values" unless a.kind_of? LispAtomWithValue and b.kind_of? LispAtomWithValue
-	return a.class.new(a.val + b.val)
+	a = eval_ast(ast.first, env)
+	b = eval_ast(ast.rest.first, env)
+	raise LispException, "plus only works with values" unless a.kind_of? LispAtomWithValue and b.kind_of? LispAtomWithValue
+	result = a.class.new(a.val + b.val)
+	
+	c_unevaled = ast.rest.rest
+	if c_unevaled.kind_of? LispNil
+		result
+	else
+		eval_plus(LispPair.new(result, c_unevaled), env)
+	end
 end
 
 def eval_minus(ast, env)
-	params = ast
-	a, b = eval_ast(params.first, env), eval_ast(params.rest.first, env)
-	raise LispException, "minus requires two values" unless a.kind_of? LispAtomWithValue and b.kind_of? LispAtomWithValue
-	return a.class.new(a.val - b.val)
+	a = eval_ast(ast.first, env)
+	b = eval_ast(ast.rest.first, env)
+	raise LispException, "minus only works with values" unless a.kind_of? LispAtomWithValue and b.kind_of? LispAtomWithValue
+	result = a.class.new(a.val - b.val)
+	
+	c_unevaled = ast.rest.rest
+	if c_unevaled.kind_of? LispNil
+		result
+	else
+		eval_minus(LispPair.new(result, c_unevaled), env)
+	end
 end
 
 def eval_eq?(ast, env)
@@ -490,27 +504,31 @@ def eval_load(ast, env)
 		scan = Scanner.new f
 		begin
 			content = read(scan)
-			puts ">> #{print_ast(content)}"
+			$stderr.puts ">> #{print_ast(content)}"
 			result = eval_ast(content, env)
-			puts "=> #{print_ast(result)}"
+			$stderr.puts "=> #{print_ast(result)}"
 		end until f.eof?
 	end
 	return result
 end
 
 def eval_puts(ast, env)
-	text = ast.first.val
-	puts text.gsub('\n', "\n").gsub('\t', "\t") + "\n"
-	return ast.first
+	atom = eval_ast(ast.first, env)
+	puts atom.val.gsub('\n', "\n").gsub('\t', "\t") + "\n"
+	return atom
 end
 
 def eval_print(ast, env)
-	text = ast.first.val
-	print text.gsub('\n', "\n").gsub('\t', "\t")
-	return ast.first
+	atom = eval_ast(ast.first, env)
+	print atom.val.gsub('\n', "\n").gsub('\t', "\t")
+	return atom
 end
 
 def eval_to_s(ast, env)
+	LispStr.new eval_ast(ast.first, env).val.to_s
+end
+
+def eval_inspect(ast, env)
 	LispStr.new print_ast(eval_ast(ast.first, env))
 end
 
@@ -564,6 +582,8 @@ test_env = global_env.dup
 	"(cons 1 2)" => "(1 . 2)",
 	"(first (cons 1 2))" => "1", "(rest (cons 1 2))" => "2",
 	"(plus 1 2)" => "3", "(minus 2 1)" => "1",
+	"(plus 1 2 3 4)" => "10", "(minus 2 1 1)" => "0",
+	'(plus "hallo" " " "welt")' => '"hallo welt"',
 	"(eq? 1 1)" => "true", "(eq? 1 2)" => "false",
 	"(gt? 2 1)" => "true", "(gt? 1 2)" => "false",
 	"(if true 1 2)" => "1", "(if false 1 2)" => "2", "(if (eq? 5 5) 1 2)" => "1",

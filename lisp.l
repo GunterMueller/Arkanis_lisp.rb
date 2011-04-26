@@ -153,6 +153,17 @@
 (env_def global_env 'minus '__minus)
 (env_def global_env 'lambda '__lambda)
 
+(define comp_env (env_new nil))
+(env_def comp_env 'cons '__comp_cons)
+(env_def comp_env 'first '__comp_first)
+(env_def comp_env 'rest '__comp_rest)
+(env_def comp_env 'define '__comp_define)
+(env_def comp_env 'set '__comp_set)
+(env_def comp_env 'plus '__comp_plus)
+(env_def comp_env 'minus '__comp_minus)
+(env_def comp_env 'lambda '__comp_lambda)
+(env_def comp_env '__next_lambda_num 0)
+
 ; the ever mighty eval
 (define eval (lambda (ast env)
 	(if (symbol? ast)
@@ -191,9 +202,29 @@
 		(eval_lambda args env)
 	(if (lambda? func)
 		(eval_exec_lambda func args env)
+	
+	(if (eq? func '__comp_cons)
+		(comp_cons args env)
+	(if (eq? func '__comp_first)
+		(comp_first args env)
+	(if (eq? func '__comp_rest)
+		(comp_rest args env)
+	(if (eq? func '__comp_define)
+		(comp_define args env)
+	(if (eq? func '__comp_set)
+		(comp_set args env)
+	(if (eq? func '__comp_plus)
+		(comp_plus args env)
+	(if (eq? func '__comp_minus)
+		(comp_minus args env)
+	(if (eq? func '__comp_lambda)
+		(comp_lambda args env)
+	(if (comp_lambda? func)
+		(comp_exec_lambda func args env)
+	
 	; else
 		(error (plus "Unknown build in: " (to_s func)))
-	)))))))))
+	))))))))) )))))))))
 ))
 
 ;
@@ -224,20 +255,35 @@
 ;
 (define eval_plus (lambda (args env)
 	(if (and (atom? (first args)) (atom? (second args)))
-		(plus (eval (first args) env) (eval (second args) env))
-		(error "plus can only add atoms but got")
+		(if (nil? (rest (rest args)))
+			(plus (eval (first args) env) (eval (second args) env))
+			(eval_plus (cons
+				(plus (eval (first args) env) (eval (second args) env))
+				(rest (rest args))
+			) env)
+		)
+		(error "plus can only add atoms")
 	)
 ))
 
 (define eval_minus (lambda (args evn)
 	(if (and (atom? (first args)) (atom? (second args)))
-		(minus (eval (first args) env) (eval (second args) env))
-		(error "plus can only add atoms but got")
+		(if (nil? (rest (rest args)))
+			(minus (eval (first args) env) (eval (second args) env))
+			(eval_minus (cons
+				(minus (eval (first args) env) (eval (second args) env))
+				(rest (rest args))
+			) env)
+		)
+		(error "minus can only work with atoms")
 	)
 ))
 
 (assert (eval '(plus 1 2) global_env) 3)
+(assert (eval '(plus 1 2 3 4) global_env) 10)
 (assert (eval '(minus 3 2) global_env) 1)
+(assert (eval '(minus 3 2 1) global_env) 0)
+(assert (eval '(minus 10 2 -4 8) global_env) 4)
 
 
 ;
@@ -354,3 +400,112 @@
 (assert (eval '(one) lam_test_env) 1 "lambda execution from environment broken")
 (eval '(define inc (lambda (a) (plus a 1))) lam_test_env)
 (assert (eval '(inc 1) lam_test_env) 2 "lambda execution from environment broken")
+
+
+
+;
+; Compiler functions
+;
+
+(define code (lambda (source_code)
+	(puts source_code)
+))
+
+(define comp_cons (lambda (args env)
+	(plus "[" (to_s (eval (first args) env)) ", " (to_s (eval (first (rest args)) env)) "]")
+))
+
+(define comp_first (lambda (args env)
+	(plus (to_s (eval (first args) env)) ".first")
+))
+
+(define comp_rest (lambda (args env)
+	(plus (to_s (eval (first args) env)) ".last")
+))
+
+(assert (eval '(cons 1 2) comp_env) "[1, 2]" "compiled cons broken")
+(assert (eval '(first (cons 1 2)) comp_env) "[1, 2].first" "compiled first broken")
+(assert (eval '(rest (cons 1 2)) comp_env) "[1, 2].last" "compiled rest broken")
+
+
+(define comp_define (lambda (args env)
+	(code (plus
+		(to_s (first args))
+		" = "
+		(to_s (eval (second args) env))
+	))
+))
+
+(define comp_set (lambda (args env)
+	; In Ruby there is no difference between defining and setting a variable
+	(comp_define args env)
+))
+
+(assert (eval '(define a 1) comp_env) "a = 1" "compiled define broken")
+(assert (eval '(define a (cons 2 3)) comp_env) "a = [2, 3]" "compiled define broken")
+
+
+(define comp_plus (lambda (args env)
+	(plus
+		"("
+		(to_s (eval (first args) env))
+		" + "
+		(to_s (eval (second args) env))
+		")"
+	)
+))
+
+(define comp_minus (lambda (args env)
+	(plus
+		"("
+		(to_s (eval (first args) env))
+		" - "
+		(to_s (eval (second args) env))
+		")"
+	)
+))
+
+(assert (eval '(plus 1 2) comp_env) "(1 + 2)" "compiled plus broken")
+(assert (eval '(minus 1 2) comp_env) "(1 - 2)" "compiled minus broken")
+(assert (eval '(plus 1 (minus 3 2)) comp_env) "(1 + (3 - 2))" "compiled plus does not eval it arguments correctly")
+
+
+(define comp_lambda (lambda (args env)
+	(begin
+		(define lam_name (plus "__lambda_" (to_s (env_get env '__next_lambda_num))))
+		(define lam_args (second args))
+		(define lam_body (third args))
+		(code (plus
+			lam_name
+			" = lambda{|"
+			(join lam_args ", ")
+			"|"
+			(to_s (eval lam_body env))
+			"}"
+		))
+		(set __next_lambda_num (plus __next_lambda_num 1))
+		(cons '__copiled_lambda (cons lam_name))
+	)
+))
+
+(define join (lambda (elements glue)
+	(if (nil? (rest elements))
+		(to_s (first elements))
+		(plus (to_s (first elements)) glue (join (rest elements) glue))
+	)
+))
+
+(assert (join '(1 2 3) ",") "1,2,3" "join broken")
+
+
+(define comp_lambda? (lambda (lam)
+	(if (eq? lam '__copiled_lambda)
+		true
+		false
+	)
+))
+
+(define comp_exec_lambda (lambda (lam args env)
+	; TODO: args need to be valed before joined...
+	(code (plus (second lam) ".call(" (join args ", ") ")"))
+))
