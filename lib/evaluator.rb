@@ -29,19 +29,52 @@ module Evaluator
 	# is required to respond to `call(args, next_cont)`.  The `args` hash is given to the function call and can be
 	# used as local storage between invoking the same continuation again (e.g. recursion). `next` is a reference
 	# to the continuation that continues the control flow after the current continuation finished its business.
+	# 
+	# `heap` is a kind of shared or global storage for multiple continuations. When ever a new continuation is created
+	# with the helper methods `create_before` and`copy_with` a reference to the heap is given to the new continuation.
 	class Continuation
-		attr_accessor :func, :args, :next
+		attr_accessor :func, :args, :next, :heap
 		
 		def initialize(next_cont, func, args = {})
 			@func, @args, @next = func, args, next_cont
+			@heap = {}
 		end
+		
+		# Just syntactic sugar. Updates the arguments and returns self.
+		def with(named_args)
+			@args.update(named_args)
+			return self
+		end
+		
+		# Creates and returns a new continuation with `self` as next continuation. This effectively inserts
+		# a new continuation into the control flow. A reference to the heap of `self` is also given to the new
+		# continuation and therefore both share the heap.
+		def create_before(func, args = {})
+			prev_cont = self.class.new self, func, args
+			prev_cont.heap = @heap
+			return prev_cont
+		end
+		
+		# Creates and returns a new continuation with `next` as next continuation. This effectively inserts
+		# a new continuation between the current and the next continuation. A reference to the heap of
+		# `self` is also given to the new continuation and therefore both share the heap.
+		def create_after(func, args = {})
+			next_cont = self.class.new @next, func, args
+			next_cont.heap = @heap
+			return next_cont
+		end
+		
 		
 		# Returns a copy of the continuation but with updated args and optionally updated next continuation
 		# reference. This allows an "patch args and retry" approach to programming without affecting the
 		# original continuation. This can be important because patching the next continuation can destroy a
-		# control flow chain if the continuation is used multiple times (e.g. in a loop).
-		def repeat_with(next_cont = nil, named_args)
-			return self.class.new((next_cont or @next), @func, @args.merge(named_args))
+		# control flow chain if the continuation is used multiple times (e.g. for a loop).
+		# 
+		# The heap however is not copied but shared between the original an the copy.
+		def copy_with(next_cont = nil, named_args)
+			new_cont = self.class.new((next_cont or @next), @func, @args.merge(named_args))
+			new_cont.heap = @heap
+			return new_cont
 		end
 		
 		# Returns the next continuation with its `args` updated with the specified values. If you return
@@ -55,10 +88,17 @@ module Evaluator
 		# Returns a nice text representation. Usually of the continuation itself with its arguments as well as the next
 		# continuation. The `depth` parameter can be used to set the number of continuations of the continuation
 		# chain outputed.
-		def to_s(depth = 2)
-			if depth > 0
+		def to_s(depth = nil)
+			if depth.nil? or depth > 0
 				func_name = (@func.respond_to? :name) ? @func.name : 'unknown'
-				"#{func_name}\e[2m(#{ @args.collect{|name, arg| "#{name}: #{arg}"}.join(', ') })\e[0m -> #{@next ? @next.to_s(depth - 1) : 'nil'}"
+				func_args = @args.collect{|name, arg| "#{name}: #{arg}"}.join(', ')
+				func_heap = @heap.inspect
+				
+				if depth.nil?
+					"#{func_name}(#{func_args})#{func_heap}"
+				else
+					"#{func_name}\e[2m(#{func_args})#{func_heap}\e[0m → #{@next ? @next.to_s(depth - 1) : 'nil'}"
+				end
 			else
 				"..."
 			end
@@ -81,7 +121,7 @@ module Evaluator
 			if ast.kind_of? LispAtom
 				if ast.kind_of? LispSym
 					# Resolve the binding and let it continue with whatever comes after eval
-					return Continuation.new(current_cont.next, method(:eval_binding), name: ast, env: env)
+					return current_cont.create_after method(:eval_binding), name: ast, env: env
 				else
 					# Give the input AST unmodified to the next continuation. Atoms
 					# eval to them selfs.
@@ -93,10 +133,10 @@ module Evaluator
 				
 				# Build the continuation that takes the evaled function slot and executes it. Directly set the
 				# function arguments and environment since `eval` only outputs to the :ast argument.
-				func_call_cont = Continuation.new current_cont.next, method(:eval_function_call), args: func_args, env: env
+				func_call_cont = current_cont.create_after method(:eval_function_call), args: func_args, env: env
 				# Batch the current continuation so we continue with evaling the function slot. After that the function
 				# call continuation comes next.
-				return current_cont.repeat_with(func_call_cont, ast: func_slot, env: env)
+				return current_cont.copy_with(func_call_cont, ast: func_slot, env: env)
 			end
 		end
 		
@@ -115,9 +155,12 @@ module Evaluator
 				return current_cont.next_with(ast: env[name.val.to_sym])
 			else
 				if env.parent
-					return current_cont.repeat_with name: name, env: env.parent
+					# TODO: check if copy_with is necessary
+					return current_cont.with name: name, env: env.parent
 				else
-					raise LispException, "Could not resolve symbol #{name.val.inspect}"
+					return current_cont.heap[:error_handler].with message: 
+						"Could not resolve symbol #{name.val.inspect}",
+						ast: name, backtrace: caller(0)
 				end
 			end
 		end
@@ -146,14 +189,18 @@ module Evaluator
 			if func_slot.kind_of? LispSym
 				buildin_name = func_slot.val.to_sym
 				if Buildins.singleton_methods.include? buildin_name
-					return Continuation.new current_cont.next, Buildins.method(buildin_name), arg_ast: func_args, env: env
+					return current_cont.create_after Buildins.method(buildin_name), arg_ast: func_args, env: env
 				else
-					raise LispException, "Tried to call unknown buildin with the name \"#{buildin_name}\""
+					return current_cont.heap[:error_handler].with message:
+						"Tried to call unknown buildin with the name \"#{buildin_name}\"",
+						ast: LispPair.new(func_slot, func_args), backtrace: caller(0)
 				end
 			elsif func_slot.kind_of? LispLambda
-				return Continuation.new current_cont.next, method(:eval_lambda), lambda: func_slot, arg_ast: func_args, env: env
+				return current_cont.create_after method(:eval_lambda), lambda: func_slot, arg_ast: func_args, env: env
 			else
-				raise LispException, "Got unknown stuff in the function slot: #{Printer.print(func_slot)}"
+				return current_cont.heap[:error_handler].with message:
+					"Got unknown stuff in the function slot: #{Printer.print(func_slot)}",
+					ast: LispPair.new(func_slot, func_args), backtrace: caller(0)
 			end
 		end
 		
@@ -176,7 +223,7 @@ module Evaluator
 				return current_cont
 			elsif args[:unevaled_args] and args[:unevaled_args].size > 0
 				# We are called by someone who wants the list in :unevaled_args evaled
-				return Continuation.new current_cont, method(:eval), ast: current_cont.args[:unevaled_args].shift, env: args[:env]
+				return current_cont.create_before method(:eval), ast: current_cont.args[:unevaled_args].shift, env: args[:env]
 			else
 				# No unevaled args left, continue with whatever someone set out for us. But give them the evaled args
 				# they requested.
@@ -203,8 +250,13 @@ module Evaluator
 			# First eval the arguments in the current eval environment
 			unless args[:evaled_args]
 				unevaled_args = lisp_list_to_array(arg_ast)
-				raise LispException, "Lambda requires #{lambda.arg_names.size} arguments but #{unevaled_args.size} were given" unless lambda.arg_names.size == unevaled_args.size
-				return Continuation.new(current_cont, method(:eval_function_args), unevaled_args: unevaled_args, env: eval_env)
+				unless lambda.arg_names.size == unevaled_args.size
+					return current_cont.heap[:error_handler].with message:
+						"Lambda requires #{lambda.arg_names.size} arguments but #{unevaled_args.size} were given",
+						ast: LispPair.new(lambda, arg_ast), backtrace: caller(0)
+				end
+				
+				return current_cont.create_before method(:eval_function_args), unevaled_args: unevaled_args, env: eval_env
 			end
 			
 			# We got all arguments evaled, now build a new environment with them and execute the lambda in there
@@ -214,7 +266,7 @@ module Evaluator
 				execution_env[lambda.arg_names[index].to_sym] = evaled_arg
 			end
 			
-			return Continuation.new current_cont.next, method(:eval), ast: lambda.body, env: execution_env
+			return current_cont.create_after method(:eval), ast: lambda.body, env: execution_env
 		end
 		
 		# Small utility function to convert a Lisp list into a ruby array
@@ -259,16 +311,40 @@ module Evaluator
 			end
 			
 			def define(args, current_cont)
-				# If :evaled_args argument is not set we eval the value argument first
-				unless args[:evaled_args]
-					value = args[:arg_ast].rest.first
-					return Continuation.new(current_cont, Evaluator.method(:eval_function_args), unevaled_args: [value], env: args[:env])
+				key, value, env = args[:arg_ast].first, args[:arg_ast].rest.first, args[:env]
+				
+				if key.kind_of? LispSym
+					# Usual form of define, we eval the value and put the result into the environment
+					unless args[:evaled_args]
+						return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [value], env: env
+					end
+					
+					result = args[:evaled_args].first
+					env[key.val.to_sym] = result
+				elsif key.kind_of? LispPair
+					# We got the lambda define shorthand syntax. Here we don't eval anything
+					lambda_name = key.first
+					lambda_args = Evaluator.lisp_list_to_array(key.rest).collect{|atom| atom.val.to_sym}
+					body_args = args[:arg_ast].rest
+					if body_args.kind_of? LispPair and not body_args.rest.kind_of? LispNil
+						# We got multiple statements as body, wrap them into a "begin" call
+						lambda_body = LispPair.new(LispSym.new("begin"), args[:arg_ast].rest)
+					else
+						# Just one body, take it as it is
+						lambda_body = body_args.first
+					end
+					
+					
+					
+					result = LispLambda.new lambda_args, lambda_body, args[:env]
+					env[lambda_name.val.to_sym] = result
+				else
+					return current_cont.heap[:error_handler].with message:
+						"define requires a symbol or pair as first parameter",
+						ast: args[:arg_ast], backtrace: caller(0)
 				end
 				
-				name, value, env = args[:arg_ast].first, args[:evaled_args].first, args[:env]
-				raise LispException, "define requires a symbol as first parameter" unless name.kind_of? LispSym
-				env[name.val.to_sym] = value
-				return current_cont.next_with(ast: value)
+				return current_cont.next_with(ast: result)
 			end
 			
 			def lambda(args, current_cont)
@@ -281,7 +357,7 @@ module Evaluator
 				# Eval all arguments
 				unless args[:evaled_args]
 					statements = Evaluator.lisp_list_to_array(args[:arg_ast])
-					return Continuation.new(current_cont, Evaluator.method(:eval_function_args), unevaled_args: statements, env: args[:env])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: statements, env: args[:env]
 				end
 				
 				# And then return the result of the last
@@ -292,7 +368,7 @@ module Evaluator
 				# Eval all args
 				unless args[:evaled_args]
 					unevaled_args = Evaluator.lisp_list_to_array(args[:arg_ast])
-					return Continuation.new(current_cont, Evaluator.method(:eval_function_args), unevaled_args: unevaled_args, env: args[:env])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: unevaled_args, env: args[:env]
 				end
 				
 				filename, *options = args[:evaled_args]
@@ -303,10 +379,12 @@ module Evaluator
 					# Continue right away with the code below. We don't need a continuation to jump there
 				end
 				
-				# Read each statement and give it to eval
+				# Read each statement and give it to eval. Also put it into the heap so the
+				# error handler can show it.
 				unless args[:file].eof?
 					input_ast = Reader.read(args[:scanner])
-					return Continuation.new(current_cont, Evaluator.method(:eval), ast: input_ast, env: args[:env])
+					current_cont.heap[:statement_ast] = input_ast
+					return current_cont.create_before Evaluator.method(:eval), ast: input_ast, env: args[:env]
 				end
 				
 				# In the final step close the lisp file and return the last result ast we got
@@ -324,7 +402,7 @@ module Evaluator
 				unless args[:evaled_args]
 					arg_ast = args[:arg_ast]
 					a, b = arg_ast.first, arg_ast.rest.first
-					return Continuation.new(current_cont, Evaluator.method(:eval_function_args), unevaled_args: [a, b], env: args[:env])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [a, b], env: args[:env]
 				end
 				
 				# First two arguments evaled
@@ -338,14 +416,19 @@ module Evaluator
 				# If :evaled_args argument is not set eval the first two arguments first
 				unless args[:evaled_args]
 					param = args[:arg_ast].first
-					return Continuation.new(current_cont, Evaluator.method(:eval_function_args), unevaled_args: [param], env: args[:env])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [param], env: args[:env]
 				end
 				
 				# First two arguments evaled
 				evaled_param = args[:evaled_args].first
-				raise LispException, "first requires a pair as argument" unless evaled_param.kind_of? LispPair
-				result = evaled_param.first
 				
+				unless evaled_param.kind_of? LispPair
+					return current_cont.heap[:error_handler].with message:
+						"first requires a pair as argument" ,
+						ast: args[:arg_ast], backtrace: caller(0)
+				end
+				
+				result = evaled_param.first
 				return current_cont.next_with(ast: result)
 			end
 			
@@ -354,7 +437,7 @@ module Evaluator
 				unless args[:evaled_args]
 					arg_ast = args[:arg_ast]
 					pair, val = arg_ast.first, arg_ast.rest.first
-					return Continuation.new(current_cont, Evaluator.method(:eval_function_args), unevaled_args: [pair, val], env: args[:env])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [pair, val], env: args[:env]
 				end
 				
 				# First two arguments evaled
@@ -368,14 +451,19 @@ module Evaluator
 				# If :evaled_args argument is not set eval the first two arguments first
 				unless args[:evaled_args]
 					param = args[:arg_ast].first
-					return Continuation.new(current_cont, Evaluator.method(:eval_function_args), unevaled_args: [param], env: args[:env])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [param], env: args[:env]
 				end
 				
 				# First two arguments evaled
 				evaled_param = args[:evaled_args].first
-				raise LispException, "first requires a pair as argument" unless evaled_param.kind_of? LispPair
-				result = evaled_param.rest
 				
+				unless evaled_param.kind_of? LispPair
+					return current_cont.heap[:error_handler].with message:
+						"rest requires a pair as argument" ,
+						ast: args[:arg_ast], backtrace: caller(0)
+				end
+				
+				result = evaled_param.rest
 				return current_cont.next_with(ast: result)
 			end
 			
@@ -384,7 +472,7 @@ module Evaluator
 				unless args[:evaled_args]
 					arg_ast = args[:arg_ast]
 					pair, val = arg_ast.first, arg_ast.rest.first
-					return Continuation.new(current_cont, Evaluator.method(:eval_function_args), unevaled_args: [pair, val], env: args[:env])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [pair, val], env: args[:env]
 				end
 				
 				# First two arguments evaled
@@ -392,6 +480,19 @@ module Evaluator
 				pair.rest = val
 				
 				return current_cont.next_with(ast: pair)
+			end
+			
+			def last(args, current_cont)
+				unless args[:evaled_args]
+					pair = args[:arg_ast].first
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [pair], env: args[:env]
+				end
+				
+				pair = args[:evaled_args].first
+				pair = pair.rest while pair.rest.kind_of? LispPair
+				
+				result = pair.rest.kind_of?(LispNil) ? pair.first : pair.rest
+				return current_cont.next_with(ast: result)
 			end
 			
 			
@@ -404,12 +505,16 @@ module Evaluator
 				unless args[:evaled_args]
 					arg_ast = args[:arg_ast]
 					a, b = arg_ast.first, arg_ast.rest.first
-					return Continuation.new(current_cont, Evaluator.method(:eval_function_args), unevaled_args: [a, b], env: args[:env])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [a, b], env: args[:env]
 				end
 				
 				# First two arguments evaled
 				a, b = *args[:evaled_args]
-				raise LispException, "plus only works with values" unless a.kind_of? LispAtomWithValue and b.kind_of? LispAtomWithValue
+				unless a.kind_of? LispAtomWithValue and b.kind_of? LispAtomWithValue
+					return current_cont.heap[:error_handler].with message:
+						"plus only works with values",
+						ast: args[:arg_ast], backtrace: caller(0)
+				end
 				result = a.class.new(a.val + b.val)
 				
 				c = args[:arg_ast].rest.rest
@@ -417,7 +522,7 @@ module Evaluator
 					return current_cont.next_with(ast: result)
 				else
 					# There is more to add, continue with a next plus
-					return current_cont.repeat_with(arg_ast: LispPair.new(result, c), evaled_args: nil)
+					return current_cont.copy_with(arg_ast: LispPair.new(result, c), evaled_args: nil)
 				end
 			end
 			
@@ -426,12 +531,16 @@ module Evaluator
 				unless args[:evaled_args]
 					arg_ast = args[:arg_ast]
 					a, b = arg_ast.first, arg_ast.rest.first
-					return Continuation.new(current_cont, Evaluator.method(:eval_function_args), unevaled_args: [a, b], env: args[:env])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [a, b], env: args[:env]
 				end
 				
 				# First two arguments evaled
 				a, b = *args[:evaled_args]
-				raise LispException, "minus only works with values" unless a.kind_of? LispAtomWithValue and b.kind_of? LispAtomWithValue
+				unless a.kind_of? LispAtomWithValue and b.kind_of? LispAtomWithValue
+					return current_cont.heap[:error_handler].with message:
+						"minus only works with values",
+						ast: args[:arg_ast], backtrace: caller(0)
+				end
 				result = a.class.new(a.val - b.val)
 				
 				c = args[:arg_ast].rest.rest
@@ -439,9 +548,45 @@ module Evaluator
 					return current_cont.next_with(ast: result)
 				else
 					# There is more to add, continue with a next plus
-					return current_cont.repeat_with(arg_ast: LispPair.new(result, c), evaled_args: nil)
+					return current_cont.copy_with(arg_ast: LispPair.new(result, c), evaled_args: nil)
 				end
 			end
+			
+			
+			#
+			# Logical operators
+			#
+			
+			def not(args, current_cont)
+				unless args[:evaled_args]
+					unevaled_arg = args[:arg_ast].first
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [unevaled_arg], env: args[:env]
+				end
+				
+				result = args[:evaled_args].first.kind_of?(LispTrue) ? LispFalse.instance : LispTrue.instance
+				return current_cont.next_with ast: result
+			end
+			
+			def and(args, current_cont)
+				unless args[:evaled_args]
+					unevaled_args = Evaluator.lisp_list_to_array(args[:arg_ast])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: unevaled_args, env: args[:env]
+				end
+				
+				result = args[:evaled_args].all?{|arg| arg.kind_of?(LispTrue)} ? LispTrue.instance : LispFalse.instance
+				return current_cont.next_with ast: result
+			end
+			
+			def or(args, current_cont)
+				unless args[:evaled_args]
+					unevaled_args = Evaluator.lisp_list_to_array(args[:arg_ast])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: unevaled_args, env: args[:env]
+				end
+				
+				result = args[:evaled_args].any?{|arg| arg.kind_of?(LispTrue)} ? LispTrue.instance : LispFalse.instance
+				return current_cont.next_with ast: result
+			end
+			
 			
 			#
 			# Comparism buildins
@@ -452,7 +597,7 @@ module Evaluator
 				unless args[:evaled_args]
 					arg_ast = args[:arg_ast]
 					a, b = arg_ast.first, arg_ast.rest.first
-					return Continuation.new(current_cont, Evaluator.method(:eval_function_args), unevaled_args: [a, b], env: args[:env])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [a, b], env: args[:env]
 				end
 				
 				# First two arguments evaled
@@ -466,12 +611,18 @@ module Evaluator
 				unless args[:evaled_args]
 					arg_ast = args[:arg_ast]
 					a, b = arg_ast.first, arg_ast.rest.first
-					return Continuation.new(current_cont, Evaluator.method(:eval_function_args), unevaled_args: [a, b], env: args[:env])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [a, b], env: args[:env]
 				end
 				
 				# First two arguments evaled
 				a, b = *args[:evaled_args]
-				raise LispException, "gt? requires to atoms" unless a.kind_of? LispAtom and b.kind_of? LispAtom
+				
+				unless a.kind_of? LispAtom and b.kind_of? LispAtom
+					return current_cont.heap[:error_handler].with message:
+						"gt? requires to atoms",
+						ast: args[:arg_ast], backtrace: caller(0)
+				end
+				
 				result = (a > b) ? LispTrue.instance : LispFalse.instance
 				return current_cont.next_with(ast: result)
 			end
@@ -485,7 +636,7 @@ module Evaluator
 				# If :evaled_args argument is not set eval the condition argument
 				unless args[:evaled_args]
 					cond = args[:arg_ast].first
-					return Continuation.new(current_cont, Evaluator.method(:eval_function_args), unevaled_args: [cond], env: args[:env])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [cond], env: args[:env]
 				end
 				
 				cond = args[:evaled_args].first
@@ -495,7 +646,7 @@ module Evaluator
 					args[:arg_ast].rest.rest.first
 				end
 				
-				return Continuation.new current_cont.next, Evaluator.method(:eval), ast: branch_ast, env: args[:env]
+				return current_cont.create_after Evaluator.method(:eval), ast: branch_ast, env: args[:env]
 			end
 			
 			
@@ -509,7 +660,7 @@ module Evaluator
 						# Eval the first argument
 						unless args[:evaled_args]
 							element = args[:arg_ast].first
-							return Continuation.new(current_cont, Evaluator.method(:eval_function_args), unevaled_args: [element], env: args[:env])
+							return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [element], env: args[:env]
 						end
 						
 						# Perform the test
@@ -518,6 +669,38 @@ module Evaluator
 					end
 				EOD
 			end
+			
+			
+			#
+			# Output buildins
+			#
+			
+			def print(args, current_cont)
+				unless args[:evaled_args]
+					unevaled_args = Evaluator.lisp_list_to_array(args[:arg_ast])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: unevaled_args, env: args[:env]
+				end
+				
+				args[:evaled_args].each do |arg|
+					Kernel.print arg.val if arg.kind_of? LispAtomWithValue
+				end
+				
+				return current_cont.next_with ast: args[:evaled_args].last
+			end
+			
+			def puts(args, current_cont)
+				unless args[:evaled_args]
+					unevaled_args = Evaluator.lisp_list_to_array(args[:arg_ast])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: unevaled_args, env: args[:env]
+				end
+				
+				args[:evaled_args].each do |arg|
+					Kernel.puts arg.val if arg.kind_of? LispAtomWithValue
+				end
+				
+				return current_cont.next_with ast: args[:evaled_args].last
+			end
+			
 		end
 	end
 	
@@ -529,6 +712,7 @@ module Evaluator
 			"(cons 1 2)" => "(1 . 2)",
 			"(first (cons 1 2))" => "1", "(rest (cons 1 2))" => "2",
 			"(set_first (cons 1 2) 3)" => "(3 . 2)", "(set_rest (cons 1 2) 3)" => "(1 . 3)",
+			"(last '(1 2 3 4))" => "4",
 			"(plus 1 2)" => "3", "(minus 2 1)" => "1",
 			"(plus 1 2 3 4)" => "10", "(minus 2 1 1)" => "0",
 			'(plus "hallo" " " "welt")' => '"hallo welt"',
@@ -544,7 +728,11 @@ module Evaluator
 			"(define inc (lambda (a) (plus a 1)))" => "(lambda (a) (plus a 1))",
 			"(inc 2)" => "3",
 			"((lambda (a b) (plus a b)) 1 2)" => "3",
+			"(define (dec a) (minus a 1))" => "(lambda (a) (minus a 1))",
+			"(dec 2)" => "1",
 			"(begin 1 2 3)" => "3",
+			"(define (begin-lambda a) (plus a 1) (plus a 2))" => "(lambda (a) (begin (plus a 1) (plus a 2)))",
+			"(begin-lambda 1)" => "3",
 			"(symbol? (quote abc))" => "true",
 			"(symbol? 1)" => "false",
 			"(pair? (cons 1 2))" => "true",
@@ -552,12 +740,23 @@ module Evaluator
 			"(atom? 1)" => "true",
 			"(atom? (quote sym))" => "true",
 			'(atom? "str")' => "true",
-			"(atom? (cons 1 2))" => "false"
+			"(atom? (cons 1 2))" => "false",
+			"(not true)" => "false",
+			"(not false)" => "true",
+			"(and true true)" => "true",
+			"(and true false)" => "false",
+			"(and false true)" => "false",
+			"(and false false)" => "false",
+			"(or true true)" => "true",
+			"(or true false)" => "true",
+			"(or false true)" => "true",
+			"(or false false)" => "false"
 		}.each do |code, result|
 			$stderr.puts "- #{code} → #{result}" if show_log
 			
 			stop_cont = Continuation.new nil, nil
 			test_runner_cont = Continuation.new stop_cont, method(:eval), ast: Reader.read(code), env: test_env
+			test_runner_cont.heap[:error_handler] = stop_cont
 			
 			cont = test_runner_cont
 			until cont == stop_cont

@@ -158,7 +158,7 @@ module Reader
 				raise LispSyntaxException, "Unterminated string!" unless str
 				LispStr.new str
 			else
-				word = scan.until(" ", "\t", "\n", ")", nil)
+				word = scan.until(" ", "\t", "\n", "\r", ")", nil)
 				if word.empty?
 					nil  # probably end of file
 				elsif word == "nil" or word == "null"
@@ -167,7 +167,7 @@ module Reader
 					LispTrue.instance
 				elsif word == "false"
 					LispFalse.instance
-				elsif word =~ /\d/
+				elsif word =~ /^\d+$/
 					LispInt.new word.to_i
 				else
 					LispSym.new word
@@ -185,6 +185,8 @@ module Reader
 			assert_equal LispInt.new(123), read(' 123 ')
 			assert_equal LispSym.new("name"), read('name')
 			assert_equal LispSym.new("name"), read(' name ')
+			assert_equal LispSym.new("_x"), read('_x')
+			assert_equal LispSym.new("_0"), read('_0')
 		end
 		
 		def read_list(scan)

@@ -106,7 +106,7 @@ def read_stream(args, current_cont)
 		return nil if $input_streams.empty?
 		
 		input_stream = $input_streams.shift
-		input_stream = Reader::StringIO(input_stream) if input_stream.kind_of?(String)
+		input_stream = Reader::StringIO.new(input_stream) if input_stream.kind_of?(String)
 		scanner = Reader::Scanner.new input_stream
 		
 		# Store the new scanner in our continuations arguments. This will
@@ -142,6 +142,9 @@ def read_stream(args, current_cont)
 		current_cont.next.next = current_cont
 	end
 	
+	# Put the intput AST into the heap so if an error occurs the error handler can show
+	# the input AST
+	current_cont.heap[:statement_ast] = input_ast
 	return current_cont.next_with(ast: input_ast, env: $global_env)
 end
 
@@ -155,48 +158,38 @@ def print_result(args, current_cont)
 	return current_cont.next
 end
 
-# We only need the read cont followed by the eval cont. The print cont
-# is inserted by the read cont whenever necessary.
-eval_cont = Evaluator::Continuation.new nil, Evaluator.method(:eval)
-read_cont = Evaluator::Continuation.new eval_cont, method(:read_stream)
-
-
-
-
-=begin
-$input_stream = $stdin
-$scan = Reader::Scanner.new($input_stream)
-
-# Reads from the input scanner (global variable `scan`). Expects no arguments.
-def read_cps(args, current_cont)
-	# Exit the trampoline if the input stream is finished
-	#return nil if $input_stream.eof?
+# Outputs errors to the user.
+# 
+# Expected arguments:
+# - message: The error message
+# - ast: Optional. The AST which caused the error
+# - backtrace: The backtrace of the interpreter (not very useful with continuations...)
+# 
+# Gives to the next continuation:
+# - error: Set to `true` so the next continuation knows that it is recovering from
+#   an error. This might be useful to decide if the stream reader should exit or not.
+def print_error(args, current_cont)
+	$stderr.puts "error: #{args[:message]}"
+	$stderr.puts "Statement: #{Printer.print(current_cont.heap[:statement_ast])}" if current_cont.heap[:statement_ast]
+	$stderr.puts "AST: #{Printer.print(args[:ast])}" if args[:ast]
+	$stderr.puts args[:backtrace].join("\n")
 	
-	$stdout.print "> "
-	$stdout.flush
-	read_ast = Reader.read($scan)
-	return nil if read_ast.nil? or $input_stream.eof?
-	
-	# continue with next cont (usually eval) and give the read AST and the global
-	# environment to it
-	return current_cont.next_with(ast: read_ast, env: $global_env)
-rescue LispException => e
-	puts "error while reading: #{e}"
-	
-	# Retry this continuation again (continue with reading)
-	return current_cont
+	current_cont.args.clear
+	current_cont.next_with error: true
 end
 
 
-
-read_cont = Evaluator::Continuation.new nil, method(:read_cps)
+# We only need the read cont followed by the eval cont. The print cont
+# is inserted by the read cont whenever necessary.
 eval_cont = Evaluator::Continuation.new nil, Evaluator.method(:eval)
-print_cont = Evaluator::Continuation.new nil, method(:print_cps)
+read_cont = eval_cont.create_before method(:read_stream)
 
-read_cont.next = eval_cont
-eval_cont.next = print_cont
-print_cont.next = read_cont
-=end
+# The error cont is used by eval after an error happend. The error handler is
+# put into the eval heap shared by all other continuations. Therefore it is accessible
+# from the entire evaluation process.
+error_cont = Evaluator::Continuation.new read_cont, method(:print_error)
+error_cont.heap = eval_cont.heap
+eval_cont.heap[:error_handler] = error_cont
 
 #
 # The continuation trampoline, start of with the read continuation
@@ -206,7 +199,12 @@ cont = read_cont
 cont_log_depth = options[:log_conts]
 while cont
 	puts cont.to_s(cont_log_depth) if cont_log_depth > 0
-	cont = cont.func.call(cont.args, cont)
+	
+	begin
+		cont = cont.func.call(cont.args, cont)
+	rescue StandardError => e
+		cont = error_cont.with message: e.message, backtrace: e.backtrace
+	end
 end
 
 $stderr.print "\nBye. Have a nice day :)\n" if options[:interactive]
