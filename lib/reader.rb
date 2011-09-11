@@ -167,7 +167,7 @@ module Reader
 					LispTrue.instance
 				elsif word == "false"
 					LispFalse.instance
-				elsif word =~ /^\d+$/
+				elsif word =~ /^-?\d+$/
 					LispInt.new word.to_i
 				else
 					LispSym.new word
@@ -183,6 +183,7 @@ module Reader
 			assert_equal LispFalse.instance, read('false')
 			assert_equal LispInt.new(123), read('123')
 			assert_equal LispInt.new(123), read(' 123 ')
+			assert_equal LispInt.new(-4), read('-4')
 			assert_equal LispSym.new("name"), read('name')
 			assert_equal LispSym.new("name"), read(' name ')
 			assert_equal LispSym.new("_x"), read('_x')

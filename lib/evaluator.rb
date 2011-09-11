@@ -32,7 +32,7 @@ module Evaluator
 	# 
 	# `heap` is a kind of shared or global storage for multiple continuations. When ever a new continuation is created
 	# with the helper methods `create_before` and`copy_with` a reference to the heap is given to the new continuation.
-	class Continuation
+	class Continuation < LispAtom
 		attr_accessor :func, :args, :next, :heap
 		
 		def initialize(next_cont, func, args = {})
@@ -195,6 +195,10 @@ module Evaluator
 						"Tried to call unknown buildin with the name \"#{buildin_name}\"",
 						ast: LispPair.new(func_slot, func_args), backtrace: caller(0)
 				end
+			elsif func_slot.kind_of? Continuation
+				# If we got a continuation in the function slot eval its first argument and then
+				# continue with that continuation.
+				return func_slot.create_before method(:eval), ast: func_args.first, env: env
 			elsif func_slot.kind_of? LispLambda
 				return current_cont.create_after method(:eval_lambda), lambda: func_slot, arg_ast: func_args, env: env
 			else
@@ -376,6 +380,7 @@ module Evaluator
 					lisp_file = File.open(filename.val)
 					current_cont.args[:file] = lisp_file
 					current_cont.args[:scanner] = Reader::Scanner.new lisp_file
+					current_cont.args[:log] = (options.detect{|opt| opt.kind_of? LispSym and opt.val == 'log'} != nil)
 					# Continue right away with the code below. We don't need a continuation to jump there
 				end
 				
@@ -383,6 +388,12 @@ module Evaluator
 				# error handler can show it.
 				unless args[:file].eof?
 					input_ast = Reader.read(args[:scanner])
+					
+					return current_cont if input_ast.nil?
+					
+					$stderr.puts "=> " + Printer.print(args[:ast]) if current_cont.args[:log] and args[:ast]
+					$stderr.puts Printer.print(input_ast) if current_cont.args[:log]
+					
 					current_cont.heap[:statement_ast] = input_ast
 					return current_cont.create_before Evaluator.method(:eval), ast: input_ast, env: args[:env]
 				end
@@ -654,7 +665,7 @@ module Evaluator
 			# Reflective buildins
 			#
 			
-			{symbol?: LispSym, pair?: LispPair, nil?: LispNil, atom?: LispAtom}.each do |name, kind|
+			{symbol?: LispSym, pair?: LispPair, nil?: LispNil, atom?: LispAtom, lambda?: LispLambda}.each do |name, kind|
 				eval <<-EOD
 					def #{name}(args, current_cont)
 						# Eval the first argument
@@ -682,7 +693,7 @@ module Evaluator
 				end
 				
 				args[:evaled_args].each do |arg|
-					Kernel.print arg.val if arg.kind_of? LispAtomWithValue
+					$stdout.print arg.val if arg.kind_of? LispAtomWithValue
 				end
 				
 				return current_cont.next_with ast: args[:evaled_args].last
@@ -695,10 +706,109 @@ module Evaluator
 				end
 				
 				args[:evaled_args].each do |arg|
-					Kernel.puts arg.val if arg.kind_of? LispAtomWithValue
+					$stdout.puts arg.val if arg.kind_of? LispAtomWithValue
 				end
 				
 				return current_cont.next_with ast: args[:evaled_args].last
+			end
+			
+			def error(args, current_cont)
+				unless args[:evaled_args]
+					unevaled_args = Evaluator.lisp_list_to_array(args[:arg_ast])
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: unevaled_args, env: args[:env]
+				end
+				
+				return current_cont.heap[:error_handler].with message:
+					args[:evaled_args].first,
+					ast: args[:arg_ast], backtrace: caller(0)
+			end
+			
+			def to_s(args, current_cont)
+				unless args[:evaled_args]
+					subject = args[:arg_ast].first
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [subject], env: args[:env]
+				end
+				
+				subject = args[:evaled_args].first
+				result = if subject.kind_of? LispAtomWithValue
+					LispStr.new subject.val.to_s
+				else
+					LispStr.new subject.to_s
+				end
+				
+				return current_cont.next_with ast: result
+			end
+			
+			
+			#
+			# Basic file I/O
+			#
+			
+			def file_open(args, current_cont)
+				unless args[:evaled_args]
+					filename, mode = args[:arg_ast].first, args[:arg_ast].rest.first
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [filename, mode], env: args[:env]
+				end
+				
+				filename, mode = args[:evaled_args].first.val, args[:evaled_args].last.val
+				file_resource = LispResource.new File.new(filename, mode)
+				return current_cont.next_with ast: file_resource
+			end
+			
+			def file_close(args, current_cont)
+				unless args[:evaled_args]
+					file_res = args[:arg_ast].first
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [file_res], env: args[:env]
+				end
+				
+				file_res = args[:evaled_args].first
+				file_res.data.close
+				return current_cont.next_with ast: LispNil.instance
+			end
+			
+			def file_write(args, current_cont)
+				unless args[:evaled_args]
+					file_res, content = args[:arg_ast].first, args[:arg_ast].rest.first
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [file_res, content], env: args[:env]
+				end
+				
+				file_res, content = args[:evaled_args].first, args[:evaled_args].last
+				bytes_written = file_res.data.write content.val
+				result = LispInt.new bytes_written
+				return current_cont.next_with ast: result
+			end
+			
+			def file_read(args, current_cont)
+				unless args[:evaled_args]
+					file_res = args[:arg_ast].first
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [file_res, content], env: args[:env]
+				end
+				
+				file_res = args[:evaled_args]
+				result = LispStr.new file_res.data.read
+				return current_cont.next_with ast: result
+			end
+			
+			
+			#
+			# Continuation stuff
+			#
+			
+			def callcc(args, current_cont)
+				unless args[:evaled_args]
+					lam = args[:arg_ast].first
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [lam], env: args[:env]
+				end
+				
+				lam = args[:evaled_args].first
+				unless lam.kind_of? LispLambda
+					return current_cont.heap[:error_handler].with message:
+						"callcc requireds a lambda as argument",
+						ast: args[:arg_ast], backtrace: caller(0)
+				end
+				
+				cont = current_cont.next
+				return current_cont.create_after Evaluator.method(:eval_lambda), lambda: lam, arg_ast: LispPair.new(cont, LispNil.instance), env: args[:env]
 			end
 			
 		end
@@ -741,6 +851,9 @@ module Evaluator
 			"(atom? (quote sym))" => "true",
 			'(atom? "str")' => "true",
 			"(atom? (cons 1 2))" => "false",
+			"(lambda? (lambda (a b) (plus a b)))" => "true",
+			"(lambda? inc)" => "true",
+			"(lambda? 3)" => "false",
 			"(not true)" => "false",
 			"(not false)" => "true",
 			"(and true true)" => "true",
@@ -750,7 +863,14 @@ module Evaluator
 			"(or true true)" => "true",
 			"(or true false)" => "true",
 			"(or false true)" => "true",
-			"(or false false)" => "false"
+			"(or false false)" => "false",
+			"(to_s 1)" => '"1"',
+			'(to_s "str")' => '"str"',
+			"(to_s true)" => '"true"',
+			# a small callcc test case
+			"(define (f return) (return 2) 3)" => "(lambda (return) (begin (return 2) 3))",
+			"(f (lambda (x) x))" => "3",
+			"(callcc f)" => "2"
 		}.each do |code, result|
 			$stderr.puts "- #{code} → #{result}" if show_log
 			

@@ -80,10 +80,20 @@ class LispPair < LispElement
 	end
 end
 
-class LispLambda < LispElement
+class LispLambda < LispAtom
 	attr_accessor :arg_names, :body, :env
 	
 	def initialize(arg_names, body, env)
 		@arg_names, @body, @env = arg_names, body, env
+	end
+end
+
+# Ment to be a container for an opaque object (e.g. a File object) that need
+# to be passed around in lisp.
+class LispResource < LispAtom
+	attr_accessor :data
+	
+	def initialize(data)
+		@data = data
 	end
 end

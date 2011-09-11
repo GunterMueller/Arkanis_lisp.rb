@@ -49,7 +49,7 @@ class LispPair
 	end
 	
 	def to_s_tail(output_stack)
-		first_str = (first.kind_of? LispPair) ? first.to_s(output_stack) : first.to_s
+		first_str = (first.kind_of? LispPair or first.kind_of? LispLambda) ? first.to_s(output_stack) : first.to_s
 		rest_str = if rest.kind_of? LispNil
 			")"
 		elsif rest.kind_of? LispPair
@@ -66,9 +66,16 @@ end
 
 class LispLambda
 	def to_s(output_stack = [])
-		"(lambda (#{arg_names.join(' ')}) #{body.to_s(output_stack << self)})"
+		"(lambda (#{arg_names.join(' ')}) #{body.kind_of?(LispPair) ? body.to_s(output_stack << self) : body.to_s})"
 	end
 end
+
+class LispResource
+	def to_s
+		"resource#{@data.inspect}"
+	end
+end
+
 
 # The printer module used by the interpreter.
 module Printer

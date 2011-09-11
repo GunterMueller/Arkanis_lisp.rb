@@ -1,3 +1,6 @@
+; This is an eval function written in lisp as well as parts of an lisp-to-ruby interpreter.
+; Works with the recursive lisp interpreter. The compiler however is incomplete.
+
 ;
 ; First some basic and general stuff we use all around the code
 ;
@@ -7,7 +10,7 @@
 (define assert (lambda (actual expected message)
 	(if (eq? expected actual)
 		true
-		(error (plus (if (nil? message) "assertion failed!" message) " got " (to_s actual)))
+		(error (if (nil? message) "assertion failed!" message))
 	)
 ))
 
@@ -26,6 +29,38 @@
 ))
 
 (assert (third '(1 2 3)) 3 "third is broken")
+
+; Logical and
+(define and (lambda (a b)
+	(if (eq? a true)
+		(if (eq? b true)
+			true
+			false
+		)
+		false
+	)
+))
+
+(assert (and true true) true)
+(assert (and true false) false)
+(assert (and false true) false)
+(assert (and false false) false)
+
+; Logical or
+(define or (lambda (a b)
+	(if (eq? a true)
+		true
+		(if (eq? b true)
+			true
+			false
+		)
+	)
+))
+
+(assert (or true true) true)
+(assert (or true false) true)
+(assert (or false true) true)
+(assert (or false false) false)
 
 
 ;
@@ -67,7 +102,7 @@
 	))
 ))
 
-; Helper for env_get and env_set. Searches the specified store for `key` and
+; Helper for env_get and evn_set. Searches the specified store for `key` and
 ; continues to search in `parent_env` if the store was completely searched. When
 ; the key is found the lambda `action` is called with the found key value pair.
 ; Practically this function encapsulates the key search logic.
@@ -112,6 +147,25 @@
 ;
 
 (define global_env (env_new nil))
+(env_def global_env 'cons '__cons)
+(env_def global_env 'first '__first)
+(env_def global_env 'rest '__rest)
+(env_def global_env 'define '__define)
+(env_def global_env 'set '__set)
+(env_def global_env 'plus '__plus)
+(env_def global_env 'minus '__minus)
+(env_def global_env 'lambda '__lambda)
+
+(define comp_env (env_new nil))
+(env_def comp_env 'cons '__comp_cons)
+(env_def comp_env 'first '__comp_first)
+(env_def comp_env 'rest '__comp_rest)
+(env_def comp_env 'define '__comp_define)
+(env_def comp_env 'set '__comp_set)
+(env_def comp_env 'plus '__comp_plus)
+(env_def comp_env 'minus '__comp_minus)
+(env_def comp_env 'lambda '__comp_lambda)
+(env_def comp_env '__next_lambda_num 0)
 
 ; the ever mighty eval
 (define eval (lambda (ast env)
@@ -133,40 +187,65 @@
 ))
 
 (define eval_list_apply (lambda (func args env)
-	; All buildins are lambdas in the environment `env`. So if it's a build in `func` will be the
-	; corresponding lambda (looked up by `eval_list`).
+	(if (eq? func '__cons)
+		(eval_cons args env)
+	(if (eq? func '__first)
+		(eval_first args env)
+	(if (eq? func '__rest)
+		(eval_rest args env)
+	(if (eq? func '__define)
+		(eval_define args env)
+	(if (eq? func '__set)
+		(eval_set args env)
+	(if (eq? func '__plus)
+		(eval_plus args env)
+	(if (eq? func '__minus)
+		(eval_minus args env)
+	(if (eq? func '__lambda)
+		(eval_lambda args env)
 	(if (lambda? func)
-		(func args env)
-	(if ((env_get env 'lisp_lambda?) func)
-		((env_get env 'exec_lambda) func args env)
+		(eval_exec_lambda func args env)
+	
+	(if (eq? func '__comp_cons)
+		(comp_cons args env)
+	(if (eq? func '__comp_first)
+		(comp_first args env)
+	(if (eq? func '__comp_rest)
+		(comp_rest args env)
+	(if (eq? func '__comp_define)
+		(comp_define args env)
+	(if (eq? func '__comp_set)
+		(comp_set args env)
+	(if (eq? func '__comp_plus)
+		(comp_plus args env)
+	(if (eq? func '__comp_minus)
+		(comp_minus args env)
+	(if (eq? func '__comp_lambda)
+		(comp_lambda args env)
+	(if (comp_lambda? func)
+		(comp_exec_lambda func args env)
+	
 	; else
 		(error (plus "Unknown build in: " (to_s func)))
-	))
-	
-	;(if (lisp_lambda? func)
-	;	(eval_exec_lambda func args env)
-	; else
-	;	(error (plus "Unknown build in: " (to_s func)))
-	;))
+	))))))))) )))))))))
 ))
-
 
 ;
 ; Pair opterations
 ;
 
-(env_def global_env 'cons (lambda (args env)
+(define eval_cons (lambda (args env)
 	(cons
 		(eval (first args) env)
 		(eval (first (rest args)) env)
 	)
 ))
 
-(env_def global_env 'first (lambda (args env)
+(define eval_first (lambda (args env)
 	(first (eval (first args) env))
 ))
 
-(env_def global_env 'rest (lambda (args env)
+(define eval_rest (lambda (args env)
 	(rest (eval (first args) env))
 ))
 
@@ -177,12 +256,11 @@
 ;
 ; Arithmetic operations
 ;
-
-(env_def global_env 'plus (lambda (args env)
+(define eval_plus (lambda (args env)
 	(if (and (atom? (first args)) (atom? (second args)))
 		(if (nil? (rest (rest args)))
 			(plus (eval (first args) env) (eval (second args) env))
-			((env_get global_env 'plus) (cons
+			(eval_plus (cons
 				(plus (eval (first args) env) (eval (second args) env))
 				(rest (rest args))
 			) env)
@@ -191,11 +269,11 @@
 	)
 ))
 
-(env_def global_env 'minus (lambda (args env)
+(define eval_minus (lambda (args evn)
 	(if (and (atom? (first args)) (atom? (second args)))
 		(if (nil? (rest (rest args)))
 			(minus (eval (first args) env) (eval (second args) env))
-			((env_get global_env 'minus) (cons
+			(eval_minus (cons
 				(minus (eval (first args) env) (eval (second args) env))
 				(rest (rest args))
 			) env)
@@ -204,25 +282,25 @@
 	)
 ))
 
-(assert (eval '(plus 1 2) global_env) 3 "plus is broken")
-(assert (eval '(plus 1 2 3 4) global_env) 10 "plus is broken")
-(assert (eval '(minus 3 2) global_env) 1 "minus is broken")
-(assert (eval '(minus 3 2 1) global_env) 0 "minus is broken")
-(assert (eval '(minus 10 2 -4 8) global_env) 4 "minus is broken")
+(assert (eval '(plus 1 2) global_env) 3)
+(assert (eval '(plus 1 2 3 4) global_env) 10)
+(assert (eval '(minus 3 2) global_env) 1)
+(assert (eval '(minus 3 2 1) global_env) 0)
+(assert (eval '(minus 10 2 -4 8) global_env) 4)
 
 
 ;
 ; Environment operations
 ;
 
-(env_def global_env 'define (lambda (args env)
+(define eval_define (lambda (args env)
 	(if (symbol? (first args))
 		(env_def env (first args) (eval (second args) env))
 		(error (plus "Only symbols can be used as keys in environments. Got: " (to_s (first args))))
 	)
 ))
 
-(env_def global_env 'set (lambda (args env)
+(define eval_set (lambda (args env)
 	(if (symbol? (first args))
 		(env_set env (first args) (eval (second args) env))
 		(error (plus "Only symbols can be used as keys in environments. Got: " (to_s (first args))))
@@ -248,26 +326,21 @@
 (assert (eval '(define d (plus 4 1)) sub_test_env) 5 "define with calculation failed")
 (assert (eval 'd sub_test_env) 5 "lookup after define with calculation failed")
 
-
 ;
 ; Lambda stuff
 ;
 
 ; Build a lambda in the form ('lambda env args body)
-(env_def global_env 'lambda (lambda (args env)
+(define eval_lambda (lambda (args env)
 	(cons 'lambda (cons env args))
 ))
 
-(assert
-	(eval '(lambda (a b) (plus a b)) global_env)
-	(cons 'lambda (cons global_env (cons '(a b) (cons '(plus a b) nil))))
-	"lambda is broken"
-)
+(assert (eval '(lambda (a b) (plus a b)) global_env) (cons 'lambda (cons global_env (cons '(a b) (cons '(plus a b) nil)))) )
 
 ; Checks if the first argument is a list in the lambda format
-(env_def global_env 'lisp_lambda? (lambda (lam)
-	(if (pair? lam)
-		(if (eq? (first lam) 'lambda)
+(define lambda? (lambda (args env)
+	(if (pair? args)
+		(if (eq? (first args) 'lambda)
 			true
 			false
 		)
@@ -275,8 +348,8 @@
 	)
 ))
 
-(assert ( (env_get global_env 'lisp_lambda?) (eval '(lambda (a) (plus a 1)) global_env) ) true "lisp_lambda? broken")
-(assert ( (env_get global_env 'lisp_lambda?) 123 ) false "lisp_lambda? broken")
+(assert (lambda? (eval '(lambda (a b) (plus a b)) global_env)) true "lambda? is broken")
+(assert (lambda? 123) false "lambda? is broken")
 
 ; Some getters for the lambda parts
 (define lam_get_env (lambda (lam)
@@ -296,7 +369,7 @@
 (assert (lam_get_body (eval '(lambda (a b) (plus a b)) global_env)) '(plus a b) "lam_get_body is broken")
 
 ; Executes a lambda with the specified arg values
-(env_def global_env 'exec_lambda (lambda (lam args env)
+(define eval_exec_lambda (lambda (lam args env)
 	(eval
 		(lam_get_body lam)
 		(eval_exec_lambda_env_builder (env_new (lam_get_env lam)) env (lam_get_args lam) args)
@@ -332,68 +405,50 @@
 (assert (eval '(inc 1) lam_test_env) 2 "lambda execution from environment broken")
 
 
+
 ;
-; Compiler stuff
+; Compiler functions
 ;
 
-(define compiler_env (env_new nil))
-
-(define compile (lambda (lisp_ast)
-	(eval lisp_ast compiler_env)
+(define code (lambda (source_code)
+	(puts source_code)
 ))
 
-(define compile_to (lambda (lisp_ast output_filename)
-	(begin
-		(define output_file (file_open output_filename "w"))
-		(file_write output_file (compile lisp_ast))
-		(file_close output_file)
-	)
+(define comp_cons (lambda (args env)
+	(plus "[" (to_s (eval (first args) env)) ", " (to_s (eval (first (rest args)) env)) "]")
 ))
 
-
-(env_def compiler_env 'cons (lambda (args env)
-	(plus "[" (to_s (eval (first args) env)) ", " (to_s (eval (second args) env)) "]")
-))
-
-(env_def compiler_env 'first (lambda (args env)
+(define comp_first (lambda (args env)
 	(plus (to_s (eval (first args) env)) ".first")
 ))
 
-(env_def compiler_env 'rest (lambda (args env)
+(define comp_rest (lambda (args env)
 	(plus (to_s (eval (first args) env)) ".last")
 ))
 
-(assert (compile '(cons 1 2)) "[1, 2]" "compile cons broken")
-(assert (compile '(first (cons 1 2))) "[1, 2].first" "compile first broken")
-(assert (compile '(rest (cons 1 2))) "[1, 2].last" "compile rest broken")
+(assert (eval '(cons 1 2) comp_env) "[1, 2]" "compiled cons broken")
+(assert (eval '(first (cons 1 2)) comp_env) "[1, 2].first" "compiled first broken")
+(assert (eval '(rest (cons 1 2)) comp_env) "[1, 2].last" "compiled rest broken")
 
 
-; Not only generate code but also create a variable in the environemnt. The value
-; of this variable is the variable name itself. This way when code for an lambda is
-; generated (it is evaled in the compiler env) the variables are resolved to their
-; variable names.
-(env_def compiler_env 'define (lambda (args env)
-	(if (symbol? (first args))
-		(begin
-			(env_def env (first args) (first args))
-			(plus (to_s (first args)) " = " (to_s (eval (second args) env)) ";")
-		)
-		(error (plus "Only symbols can be used as keys in environments. Got: " (to_s (first args))))
-	)
+(define comp_define (lambda (args env)
+	(code (plus
+		(to_s (first args))
+		" = "
+		(to_s (eval (second args) env))
+	))
 ))
 
-; Just generate code since we already have the variables defined in the environemnt.
-; The names is all we need in the compiler.
-(env_def compiler_env 'set (lambda (args env)
-	(plus (to_s (first args)) " = " (to_s (eval (second args) env)) ";")
+(define comp_set (lambda (args env)
+	; In Ruby there is no difference between defining and setting a variable
+	(comp_define args env)
 ))
 
-(assert (compile '(define a 1)) "a = 1;" "compiled define broken")
-(assert (compile '(define a (cons 2 3))) "a = [2, 3];" "compiled define broken")
-(assert (compile '(set a 2)) "a = 2;" "compiled set broken")
+(assert (eval '(define a 1) comp_env) "a = 1" "compiled define broken")
+(assert (eval '(define a (cons 2 3)) comp_env) "a = [2, 3]" "compiled define broken")
 
 
-(env_def compiler_env 'plus (lambda (args env)
+(define comp_plus (lambda (args env)
 	(plus
 		"("
 		(to_s (eval (first args) env))
@@ -403,7 +458,7 @@
 	)
 ))
 
-(env_def compiler_env 'minus (lambda (args env)
+(define comp_minus (lambda (args env)
 	(plus
 		"("
 		(to_s (eval (first args) env))
@@ -413,14 +468,28 @@
 	)
 ))
 
-(assert (compile '(plus 1 2)) "(1 + 2)" "compiled plus broken")
-(assert (compile '(minus 1 2)) "(1 - 2)" "compiled minus broken")
-(assert (compile '(plus 1 (minus 3 2))) "(1 + (3 - 2))" "compiled plus does not eval it arguments correctly")
+(assert (eval '(plus 1 2) comp_env) "(1 + 2)" "compiled plus broken")
+(assert (eval '(minus 1 2) comp_env) "(1 - 2)" "compiled minus broken")
+(assert (eval '(plus 1 (minus 3 2)) comp_env) "(1 + (3 - 2))" "compiled plus does not eval it arguments correctly")
 
 
-;
-; lambda stuff
-;
+(define comp_lambda (lambda (args env)
+	(begin
+		(define lam_name (plus "__lambda_" (to_s (env_get env '__next_lambda_num))))
+		(define lam_args (second args))
+		(define lam_body (third args))
+		(code (plus
+			lam_name
+			" = lambda{|"
+			(join lam_args ", ")
+			"|"
+			(to_s (eval lam_body env))
+			"}"
+		))
+		(set __next_lambda_num (plus __next_lambda_num 1))
+		(cons '__copiled_lambda (cons lam_name))
+	)
+))
 
 (define join (lambda (elements glue)
 	(if (nil? (rest elements))
@@ -431,41 +500,15 @@
 
 (assert (join '(1 2 3) ",") "1,2,3" "join broken")
 
-(env_def compiler_env 'lambda (lambda (args env)
-	(begin
-		(define lam_args (first args))
-		(define lam_body (second args))
-		(define lam_env_builder (lambda (lam_env args)
-			(if (pair? args)
-				(begin
-					(env_def lam_env (first args) (first args))
-					(lam_env_builder lam_env (rest args))
-				)
-			; else
-				lam_env
-			)
-		))
-		(define lam_env (lam_env_builder (env_new env) lam_args))
-		
-		(plus "lambda{|" (join lam_args ", ") "| " (eval lam_body lam_env) "}")
+
+(define comp_lambda? (lambda (lam)
+	(if (eq? lam '__copiled_lambda)
+		true
+		false
 	)
 ))
 
-(assert (compile '(lambda (a b) (plus a b))) "lambda{|a, b| (a + b)}" "compiled lambda broken")
-
-; No idea how to really do this without a bit of compile time type inference or
-; some string operations (check for the "lambda" at the start). Therefore right
-; now we just asume everything is a lambda... I know, stupid.
-(env_def compiler_env 'lisp_lambda? (lambda (lam)
-	true
+(define comp_exec_lambda (lambda (lam args env)
+	; TODO: args need to be valed before joined...
+	(code (plus (second lam) ".call(" (join args ", ") ")"))
 ))
-
-(assert ( (env_get compiler_env 'lisp_lambda?) (eval '(lambda (a) (plus a 1)) compiler_env) ) true "compiled lisp_lambda? broken")
-(assert ( (env_get compiler_env 'lisp_lambda?) 123 ) true "compiled lisp_lambda? broken")
-
-
-(env_def compiler_env 'exec_lambda (lambda (lam args env)
-	(plus lam ".call(" (join args ", ") ")")
-))
-
-(assert (compile '((lambda (a b) (plus a b)) 1 2)) "lambda{|a, b| (a + b)}.call(1, 2)" "compiled lambda exec broken")
