@@ -376,7 +376,7 @@
 	(if (symbol? (first args))
 		(begin
 			(env_def env (first args) (first args))
-			(plus (to_s (first args)) " = " (to_s (eval (second args) env)) ";")
+			(plus (to_s (first args)) " = " (to_s (eval (second args) env)) "\n")
 		)
 		(error (plus "Only symbols can be used as keys in environments. Got: " (to_s (first args))))
 	)
@@ -385,12 +385,12 @@
 ; Just generate code since we already have the variables defined in the environemnt.
 ; The names is all we need in the compiler.
 (env_def compiler_env 'set (lambda (args env)
-	(plus (to_s (first args)) " = " (to_s (eval (second args) env)) ";")
+	(plus (to_s (first args)) " = " (to_s (eval (second args) env)) "\n")
 ))
 
-(assert (compile '(define a 1)) "a = 1;" "compiled define broken")
-(assert (compile '(define a (cons 2 3))) "a = [2, 3];" "compiled define broken")
-(assert (compile '(set a 2)) "a = 2;" "compiled set broken")
+(assert (compile '(define a 1)) "a = 1\n" "compiled define broken")
+(assert (compile '(define a (cons 2 3))) "a = [2, 3]\n" "compiled define broken")
+(assert (compile '(set a 2)) "a = 2\n" "compiled set broken")
 
 
 (env_def compiler_env 'plus (lambda (args env)

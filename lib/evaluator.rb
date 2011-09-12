@@ -103,6 +103,12 @@ module Evaluator
 				"..."
 			end
 		end
+		
+		def dup
+			copy = self.class.new(@next, @func, @args.dup)
+			copy.heap = @heap.dup
+			return copy
+		end
 	end
 	
 	# Continuation passing style functions for the AST evaluation
@@ -338,8 +344,6 @@ module Evaluator
 						lambda_body = body_args.first
 					end
 					
-					
-					
 					result = LispLambda.new lambda_args, lambda_body, args[:env]
 					env[lambda_name.val.to_sym] = result
 				else
@@ -349,6 +353,36 @@ module Evaluator
 				end
 				
 				return current_cont.next_with(ast: result)
+			end
+			
+			def set(args, current_cont)
+				unless args[:evaled_args]
+					value = args[:arg_ast].rest.first
+					return current_cont.create_before Evaluator.method(:eval_function_args), unevaled_args: [value], env: args[:env]
+				end
+				
+				key, value, env = args[:arg_ast].first, args[:evaled_args].first, args[:env]
+				if key.kind_of? LispSym
+					key_name = key.val.to_sym
+					until env.nil?
+						break if env.include? key_name
+						env = env.parent
+					end
+					
+					unless env.nil?
+						env[key_name] = value
+					else
+						return current_cont.heap[:error_handler].with message:
+							"set could not find the binding #{key_name} in the current environment or it's parents",
+							ast: args[:arg_ast], backtrace: caller(0)
+					end
+				else
+					return current_cont.heap[:error_handler].with message:
+						"set requires a symbol as first parameter",
+						ast: args[:arg_ast], backtrace: caller(0)
+				end
+				
+				return current_cont.next_with(ast: value)
 			end
 			
 			def lambda(args, current_cont)
@@ -630,7 +664,7 @@ module Evaluator
 				
 				unless a.kind_of? LispAtom and b.kind_of? LispAtom
 					return current_cont.heap[:error_handler].with message:
-						"gt? requires to atoms",
+						"gt? requires two atoms",
 						ast: args[:arg_ast], backtrace: caller(0)
 				end
 				
@@ -693,7 +727,7 @@ module Evaluator
 				end
 				
 				args[:evaled_args].each do |arg|
-					$stdout.print arg.val if arg.kind_of? LispAtomWithValue
+					$stdout.print arg.val.to_s.gsub('\n', "\n").gsub('\t', "\t") if arg.kind_of? LispAtomWithValue
 				end
 				
 				return current_cont.next_with ast: args[:evaled_args].last
@@ -706,7 +740,7 @@ module Evaluator
 				end
 				
 				args[:evaled_args].each do |arg|
-					$stdout.puts arg.val if arg.kind_of? LispAtomWithValue
+					$stdout.puts arg.val.to_s.gsub('\n', "\n").gsub('\t', "\t") if arg.kind_of? LispAtomWithValue
 				end
 				
 				return current_cont.next_with ast: args[:evaled_args].last
@@ -807,7 +841,7 @@ module Evaluator
 						ast: args[:arg_ast], backtrace: caller(0)
 				end
 				
-				cont = current_cont.next
+				cont = current_cont.next.dup
 				return current_cont.create_after Evaluator.method(:eval_lambda), lambda: lam, arg_ast: LispPair.new(cont, LispNil.instance), env: args[:env]
 			end
 			
@@ -832,6 +866,8 @@ module Evaluator
 			'(quote (a 1 "b"))' => '(a 1 "b")',
 			"(if true 1 2)" => "1", "(if false 1 2)" => "2", "(if (eq? 5 5) 1 2)" => "1",
 			"(define a (plus 1 2))" => "3", "a" => "3",
+			"(define b 7)" => "7", "(set b 3)" => "3", "b" => "3",
+			"(set b (plus 4 5))" => "9", "(plus b 1)" => "10",
 			"(define var (cons 1 2))" => "(1 . 2)",
 			"(set_first var 3)" => "(3 . 2)",
 			"var" => "(3 . 2)",
@@ -879,12 +915,12 @@ module Evaluator
 			test_runner_cont.heap[:error_handler] = stop_cont
 			
 			cont = test_runner_cont
-			until cont == stop_cont
+			until cont.next.nil?
 				puts "  #{cont.to_s(show_conts_depths)}" if show_log and show_conts_depths > 0
 				cont = cont.func.call(cont.args, cont)
 			end
 			
-			evaled_code = stop_cont.args[:ast]
+			evaled_code = cont.args[:ast]
 			assert_equal result, Printer.print(evaled_code)
 		end
 	end
